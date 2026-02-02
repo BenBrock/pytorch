@@ -20,6 +20,11 @@ from torch.distributed.tensor._redistribute import (
     Redistribute,
     redistribute_local_tensor,
 )
+from torch.distributed.tensor._nvshmem_utils import (
+    copy_tensor_to_nvshmem,
+    nvshmem_tensor,
+    should_use_nvshmem,
+)
 from torch.distributed.tensor._utils import (
     assert_no_mixed_partial_types,
     compute_global_tensor_info,
@@ -46,6 +51,22 @@ __all__ = [
     "randn",
     "zeros",
 ]
+
+
+def _placements_allow_nvshmem(
+    size: torch.Size, device_mesh: DeviceMesh, placements: Sequence[Placement]
+) -> bool:
+    if not device_mesh._is_current_rank_part_of_mesh():
+        return False
+    for mesh_dim, placement in enumerate(placements):
+        if isinstance(placement, (Shard, _StridedShard)):
+            dim_size = size[placement.dim]
+            if dim_size % device_mesh.size(mesh_dim) != 0:
+                return False
+            if isinstance(placement, _StridedShard):
+                if dim_size % placement.split_factor != 0:
+                    return False
+    return True
 
 aten = torch.ops.aten
 
@@ -892,6 +913,10 @@ def distribute_tensor(
     placements = tuple(placements)
 
     assert local_tensor is not None, "distributing a tensor should not be None"
+    if should_use_nvshmem(torch.device(device_mesh.device_type)) and _placements_allow_nvshmem(
+        tensor.size(), device_mesh, placements
+    ):
+        local_tensor = copy_tensor_to_nvshmem(local_tensor)
     # detach the local tensor passed to DTensor since after the construction
     # of DTensor, autograd would work on top of DTensor instead of local tensor
     spec = DTensorSpec(
@@ -1133,25 +1158,64 @@ def _dtensor_init_helper(  # type: ignore[no-untyped-def]
         size, device_mesh, placements, skip_offset=True
     )
 
+    use_nvshmem = should_use_nvshmem(
+        torch.device(device_mesh.device_type)
+    ) and _placements_allow_nvshmem(size, device_mesh, placements)
+
     # initialize the local tensor
-    if init_op is torch.full:
-        fill_value = kwargs.pop("fill_value", 0)
-        local_tensor = init_op(local_shape, fill_value, **kwargs)
-    elif init_op is torch.rand or init_op is torch.randn:
-        # this tensor meta is not used except `shape`
+    if use_nvshmem:
         dtype = kwargs.get("dtype", torch.get_default_dtype())
+        device = torch.device(kwargs["device"])
+        local_tensor = nvshmem_tensor(
+            local_shape,
+            dtype=dtype,
+            device=device,
+            requires_grad=kwargs["requires_grad"],
+        )
 
-        tensor_meta = TensorMeta(size, torch_stride, dtype)
-        spec = DTensorSpec(device_mesh, tuple(placements), tensor_meta=tensor_meta)
+        if init_op is torch.empty:
+            pass
+        else:
+            init_kwargs = dict(kwargs)
+            init_kwargs.pop("device", None)
+            if init_kwargs.get("dtype", None) is None:
+                init_kwargs.pop("dtype", None)
+            init_kwargs["out"] = local_tensor
 
-        if random.is_rng_supported_mesh(device_mesh) and not random._rng_tracker:
-            random._rng_tracker = random.OffsetBasedRNGTracker(device_mesh)
-
-        assert random._rng_tracker is not None
-        with random._rng_tracker._distribute_region(spec):
-            local_tensor = init_op(local_shape, **kwargs)
+            if init_op is torch.full:
+                fill_value = init_kwargs.pop("fill_value", 0)
+                init_op(local_shape, fill_value, **init_kwargs)
+            elif init_op is torch.rand or init_op is torch.randn:
+                tensor_meta = TensorMeta(size, torch_stride, dtype)
+                spec = DTensorSpec(
+                    device_mesh, tuple(placements), tensor_meta=tensor_meta
+                )
+                if random.is_rng_supported_mesh(device_mesh) and not random._rng_tracker:
+                    random._rng_tracker = random.OffsetBasedRNGTracker(device_mesh)
+                assert random._rng_tracker is not None
+                with random._rng_tracker._distribute_region(spec):
+                    init_op(local_shape, **init_kwargs)
+            else:
+                init_op(local_shape, **init_kwargs)
     else:
-        local_tensor = init_op(local_shape, **kwargs)
+        if init_op is torch.full:
+            fill_value = kwargs.pop("fill_value", 0)
+            local_tensor = init_op(local_shape, fill_value, **kwargs)
+        elif init_op is torch.rand or init_op is torch.randn:
+            # this tensor meta is not used except `shape`
+            dtype = kwargs.get("dtype", torch.get_default_dtype())
+
+            tensor_meta = TensorMeta(size, torch_stride, dtype)
+            spec = DTensorSpec(device_mesh, tuple(placements), tensor_meta=tensor_meta)
+
+            if random.is_rng_supported_mesh(device_mesh) and not random._rng_tracker:
+                random._rng_tracker = random.OffsetBasedRNGTracker(device_mesh)
+
+            assert random._rng_tracker is not None
+            with random._rng_tracker._distribute_region(spec):
+                local_tensor = init_op(local_shape, **kwargs)
+        else:
+            local_tensor = init_op(local_shape, **kwargs)
 
     spec = DTensorSpec(
         device_mesh,
