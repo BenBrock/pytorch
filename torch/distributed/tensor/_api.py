@@ -22,7 +22,8 @@ from torch.distributed.tensor._redistribute import (
 )
 from torch.distributed.tensor._nvshmem_utils import (
     copy_tensor_to_nvshmem,
-    nvshmem_tensor,
+    free_nvshmem_tensor,
+    nvshmem_symmetric_tensor,
     should_use_nvshmem,
 )
 from torch.distributed.tensor._utils import (
@@ -53,20 +54,60 @@ __all__ = [
 ]
 
 
-def _placements_allow_nvshmem(
+def _chunk_sizes(length: int, num_chunks: int) -> list[int]:
+    if num_chunks <= 0:
+        return [length]
+    if length <= 0:
+        return [0] * num_chunks
+    chunk = (length + num_chunks - 1) // num_chunks
+    sizes = []
+    for i in range(num_chunks):
+        start = i * chunk
+        sizes.append(max(min(chunk, length - start), 0))
+    return sizes
+
+
+def _max_strided_shard_size(
+    length: int, num_chunks: int, split_factor: int
+) -> int:
+    if length <= 0:
+        return 0
+    if split_factor <= 0:
+        return 0
+    first_sizes = _chunk_sizes(length, split_factor)
+    per_rank = [0] * num_chunks
+    for size in first_sizes:
+        second_sizes = _chunk_sizes(size, num_chunks)
+        for rank in range(num_chunks):
+            per_rank[rank] += second_sizes[rank]
+    return max(per_rank) if per_rank else 0
+
+
+def _compute_nvshmem_symmetric_shape(
     size: torch.Size, device_mesh: DeviceMesh, placements: Sequence[Placement]
-) -> bool:
+) -> torch.Size | None:
     if not device_mesh._is_current_rank_part_of_mesh():
-        return False
+        return None
+    sym_shape = list(size)
+    ndim = len(sym_shape)
     for mesh_dim, placement in enumerate(placements):
-        if isinstance(placement, (Shard, _StridedShard)):
-            dim_size = size[placement.dim]
-            if dim_size % device_mesh.size(mesh_dim) != 0:
-                return False
-            if isinstance(placement, _StridedShard):
-                if dim_size % placement.split_factor != 0:
-                    return False
-    return True
+        if not isinstance(placement, (Shard, _StridedShard)):
+            continue
+        dim = placement.dim
+        if dim < 0:
+            dim = dim + ndim
+        if dim < 0 or dim >= ndim:
+            return None
+        curr = sym_shape[dim]
+        if isinstance(placement, _StridedShard):
+            sym_shape[dim] = _max_strided_shard_size(
+                curr, device_mesh.size(mesh_dim), placement.split_factor
+            )
+        else:
+            sym_shape[dim] = (curr + device_mesh.size(mesh_dim) - 1) // device_mesh.size(
+                mesh_dim
+            )
+    return torch.Size(sym_shape)
 
 aten = torch.ops.aten
 
@@ -331,6 +372,13 @@ class DTensor(torch.Tensor):
     def __repr__(self):  # type: ignore[override]
         # TODO: consider all_gather the local tensors for better debugging
         return f"DTensor(local_tensor={self._local_tensor}, device_mesh={self._spec.mesh}, placements={self._spec.placements})"
+
+    def nvshmem_base(self) -> torch.Tensor:
+        """
+        Returns the base NVSHMEM allocation for the local tensor, if present.
+        Falls back to the local tensor when no base is tracked.
+        """
+        return getattr(self._local_tensor, "_nvshmem_base", self._local_tensor)
 
     def __tensor_flatten__(self):
         """
@@ -913,10 +961,17 @@ def distribute_tensor(
     placements = tuple(placements)
 
     assert local_tensor is not None, "distributing a tensor should not be None"
-    if should_use_nvshmem(torch.device(device_mesh.device_type)) and _placements_allow_nvshmem(
+    nvshmem_shape = _compute_nvshmem_symmetric_shape(
         tensor.size(), device_mesh, placements
+    )
+    if (
+        should_use_nvshmem(torch.device(device_mesh.device_type))
+        and nvshmem_shape is not None
     ):
-        local_tensor = copy_tensor_to_nvshmem(local_tensor)
+        old_local_tensor = local_tensor
+        local_tensor = copy_tensor_to_nvshmem(local_tensor, nvshmem_shape)
+        if old_local_tensor is not local_tensor:
+            free_nvshmem_tensor(old_local_tensor)
     # detach the local tensor passed to DTensor since after the construction
     # of DTensor, autograd would work on top of DTensor instead of local tensor
     spec = DTensorSpec(
@@ -1158,16 +1213,19 @@ def _dtensor_init_helper(  # type: ignore[no-untyped-def]
         size, device_mesh, placements, skip_offset=True
     )
 
-    use_nvshmem = should_use_nvshmem(
-        torch.device(device_mesh.device_type)
-    ) and _placements_allow_nvshmem(size, device_mesh, placements)
+    nvshmem_shape = _compute_nvshmem_symmetric_shape(size, device_mesh, placements)
+    use_nvshmem = (
+        should_use_nvshmem(torch.device(device_mesh.device_type))
+        and nvshmem_shape is not None
+    )
 
     # initialize the local tensor
     if use_nvshmem:
         dtype = kwargs.get("dtype", torch.get_default_dtype())
         device = torch.device(kwargs["device"])
-        local_tensor = nvshmem_tensor(
+        local_tensor = nvshmem_symmetric_tensor(
             local_shape,
+            nvshmem_shape if nvshmem_shape is not None else local_shape,
             dtype=dtype,
             device=device,
             requires_grad=kwargs["requires_grad"],
