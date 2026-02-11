@@ -924,6 +924,7 @@ def distribute_tensor(
     # distribute the tensor according to the placements.
     placements = list(placements)
     for idx, placement in enumerate(placements):
+        old_local_tensor = local_tensor
         if isinstance(placement, Shard | _StridedShard):
             placement_dim = (
                 placement.dim + tensor.ndim if placement.dim < 0 else placement.dim
@@ -958,6 +959,8 @@ def distribute_tensor(
             raise RuntimeError(
                 f"Trying to distribute tensor with unsupported placements {placement} on device mesh dimension {idx}!"
             )
+        if old_local_tensor is not local_tensor:
+            free_nvshmem_tensor(old_local_tensor)
     placements = tuple(placements)
 
     assert local_tensor is not None, "distributing a tensor should not be None"
