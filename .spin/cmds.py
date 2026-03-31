@@ -8,6 +8,11 @@ import click
 import spin
 
 
+CWD = Path(__file__).absolute().parent.parent
+sys.path.insert(0, str(CWD))  # this only affects the current process
+from tools.clean import clean as _clean
+
+
 def file_digest(file, algorithm: str):
     try:
         return hashlib.file_digest(file, algorithm)
@@ -408,6 +413,7 @@ def lint(ctx, *, lintrunner_args, apply_patches, **kwargs):
     if write_json_output:
         Path(tee_file).write_text(json_output_all + json_output_changed)
     if lint_found:
+        click.secho("Lint failed!", fg="red")
         raise SystemExit(1)
 
 
@@ -438,6 +444,12 @@ def quicklint(ctx, *, lintrunner_args, apply_patches, **kwargs):
 def quickfix(ctx, *, lintrunner_args, **kwargs):
     """Autofix changed files."""
     ctx.invoke(quicklint, apply_patches=True)
+
+
+@click.command()
+def clean():
+    """Clean, that is remove all files in .gitignore except in the NOT-CLEAN-FILES section."""
+    _clean()
 
 
 @click.command()

@@ -6,7 +6,7 @@ import sys
 import unittest
 from copy import deepcopy
 from enum import Enum
-from typing import Any, Union
+from typing import Any
 
 import torch
 from torch import Tensor
@@ -58,9 +58,7 @@ class OptimizerInput:
 
     def __init__(
         self,
-        params: Union[
-            list[Parameter], list[Tensor], dict[Any, Any], list[dict[str, Any]]
-        ],
+        params: list[Parameter] | list[Tensor] | dict[Any, Any] | list[dict[str, Any]],
         kwargs: dict[str, Any],
         desc: str = "",
     ):
@@ -506,6 +504,28 @@ def optim_error_inputs_func_adagrad(device, dtype):
                 ),
                 error_type=ValueError,
                 error_regex="Invalid lr_decay value: -0.5",
+            ),
+        ]
+    if _get_device_type(device) == "cuda":
+        sample_tensor = torch.empty((), device=device, dtype=dtype)
+        error_inputs += [
+            ErrorOptimizerInput(
+                OptimizerInput(
+                    params=[sample_tensor],
+                    kwargs={"foreach": True, "fused": True},
+                    desc="`fused` and `foreach` cannot be `True` together",
+                ),
+                error_type=RuntimeError,
+                error_regex="`fused` and `foreach` cannot be `True` together",
+            ),
+            ErrorOptimizerInput(
+                OptimizerInput(
+                    params=[sample_tensor],
+                    kwargs={"fused": True, "differentiable": True},
+                    desc="`fused` does not support `differentiable`",
+                ),
+                error_type=RuntimeError,
+                error_regex="`fused` does not support `differentiable`",
             ),
         ]
     return error_inputs
@@ -1329,11 +1349,12 @@ def optim_error_inputs_func_sparseadam(device, dtype):
     return error_inputs
 
 
-def _get_device_type(device: Union[str, torch.device]) -> str:
+def _get_device_type(device: str | torch.device) -> str:
     # Returns the device type as a string, e.g., "cpu" or "cuda"
     if isinstance(device, torch.device):
         device = str(device.type)
-    assert isinstance(device, str)
+    if not isinstance(device, str):
+        raise AssertionError(f"Expected device to be a str, got {type(device)}")
     return device.split(":")[0]
 
 
@@ -1351,9 +1372,10 @@ def _get_optim_inputs_including_global_cliquey_kwargs(
     trivial. That said, we sometimes want to test for all possible configs on an
     optimizer including all supported flags, so this helper returns all optim inputs.
     """
-    assert all(x in ["foreach", "fused", "differentiable"] for x in skip), (
-        "skip must be a subset of ['foreach', 'fused', 'differentiable']"
-    )
+    if not all(x in ["foreach", "fused", "differentiable"] for x in skip):
+        raise AssertionError(
+            "skip must be a subset of ['foreach', 'fused', 'differentiable']"
+        )
 
     optim_inputs = optim_info.optim_inputs_func(device)
 
@@ -1535,6 +1557,7 @@ optim_db: list[OptimizerInfo] = [
                 "CompiledOptimizerParityTests",
                 "test_correctness",
                 device_type="xpu",
+                active_if=lambda kwargs: kwargs.get("use_closure", False),
             ),
             DecorateInfo(
                 skipIfTorchDynamo("See #133268 regarding dtype being None"),
@@ -1598,7 +1621,7 @@ optim_db: list[OptimizerInfo] = [
             "maximize",
             "capturable",
         ),
-        supports_fused_on=("cpu",),
+        supports_fused_on=("cpu", "cuda"),
         supports_sparse=True,
         metadata_for_sparse=(
             {"lr": 0.1, "weight_decay": 0, "lr_decay": 0},
@@ -1622,6 +1645,16 @@ optim_db: list[OptimizerInfo] = [
                 ),
                 "TestOptimRenewed",
                 "test_fused_matches_forloop",
+            ),
+            DecorateInfo(
+                toleranceOverride(
+                    {  # https://github.com/pytorch/pytorch/issues/116202
+                        torch.float32: tol(atol=5e-04, rtol=0.015),
+                    }
+                ),
+                "TestOptimRenewed",
+                "test_mixed_device_dtype",
+                active_if=TEST_WITH_TORCHDYNAMO,
             ),
         ),
         skips=(
