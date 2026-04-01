@@ -1,7 +1,12 @@
 import os
-from typing import Any
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
 
 import torch
+
+if TYPE_CHECKING:
+    from torch.distributed.device_mesh import DeviceMesh
+    from torch.distributed.tensor.placement_types import Placement
 
 try:
     import nvshmem.core as nvshmem
@@ -21,6 +26,62 @@ def _dtensor_use_nvshmem() -> bool:
 
 def should_use_nvshmem(device: torch.device) -> bool:
     return _dtensor_use_nvshmem() and nvshmem is not None and device.type == "cuda"
+
+
+def _chunk_sizes(length: int, num_chunks: int) -> list[int]:
+    if num_chunks <= 0:
+        return [length]
+    if length <= 0:
+        return [0] * num_chunks
+    chunk = (length + num_chunks - 1) // num_chunks
+    sizes = []
+    for i in range(num_chunks):
+        start = i * chunk
+        sizes.append(max(min(chunk, length - start), 0))
+    return sizes
+
+
+def _max_strided_local_size(length: int, num_chunks: int, split_factor: int) -> int:
+    if length <= 0:
+        return 0
+    if split_factor <= 0:
+        return 0
+    first_sizes = _chunk_sizes(length, split_factor)
+    per_rank = [0] * num_chunks
+    for size in first_sizes:
+        second_sizes = _chunk_sizes(size, num_chunks)
+        for rank in range(num_chunks):
+            per_rank[rank] += second_sizes[rank]
+    return max(per_rank) if per_rank else 0
+
+
+def compute_nvshmem_symmetric_shape(
+    size: torch.Size, device_mesh: "DeviceMesh", placements: Sequence["Placement"]
+) -> torch.Size | None:
+    from torch.distributed.tensor.placement_types import _StridedShard, Shard
+
+    if not device_mesh._is_current_rank_part_of_mesh():
+        return None
+    sym_shape = list(size)
+    ndim = len(sym_shape)
+    for mesh_dim, placement in enumerate(placements):
+        if not isinstance(placement, (Shard, _StridedShard)):
+            continue
+        dim = placement.dim
+        if dim < 0:
+            dim = dim + ndim
+        if dim < 0 or dim >= ndim:
+            return None
+        curr = sym_shape[dim]
+        if isinstance(placement, _StridedShard):
+            sym_shape[dim] = _max_strided_local_size(
+                curr, device_mesh.size(mesh_dim), placement.split_factor
+            )
+        else:
+            sym_shape[dim] = (curr + device_mesh.size(mesh_dim) - 1) // device_mesh.size(
+                mesh_dim
+            )
+    return torch.Size(sym_shape)
 
 
 def nvshmem_tensor(

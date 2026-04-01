@@ -26,8 +26,10 @@ from torch.distributed.tensor._redistribute import (
     redistribute_local_tensor,
 )
 from torch.distributed.tensor._nvshmem_utils import (
+    compute_nvshmem_symmetric_shape,
     copy_tensor_to_nvshmem,
     free_nvshmem_tensor,
+    nvshmem_base,
     nvshmem_symmetric_tensor,
     should_use_nvshmem,
 )
@@ -57,62 +59,6 @@ __all__ = [
     "randn",
     "zeros",
 ]
-
-
-def _chunk_sizes(length: int, num_chunks: int) -> list[int]:
-    if num_chunks <= 0:
-        return [length]
-    if length <= 0:
-        return [0] * num_chunks
-    chunk = (length + num_chunks - 1) // num_chunks
-    sizes = []
-    for i in range(num_chunks):
-        start = i * chunk
-        sizes.append(max(min(chunk, length - start), 0))
-    return sizes
-
-
-def _max_strided_shard_size(
-    length: int, num_chunks: int, split_factor: int
-) -> int:
-    if length <= 0:
-        return 0
-    if split_factor <= 0:
-        return 0
-    first_sizes = _chunk_sizes(length, split_factor)
-    per_rank = [0] * num_chunks
-    for size in first_sizes:
-        second_sizes = _chunk_sizes(size, num_chunks)
-        for rank in range(num_chunks):
-            per_rank[rank] += second_sizes[rank]
-    return max(per_rank) if per_rank else 0
-
-
-def _compute_nvshmem_symmetric_shape(
-    size: torch.Size, device_mesh: DeviceMesh, placements: Sequence[Placement]
-) -> torch.Size | None:
-    if not device_mesh._is_current_rank_part_of_mesh():
-        return None
-    sym_shape = list(size)
-    ndim = len(sym_shape)
-    for mesh_dim, placement in enumerate(placements):
-        if not isinstance(placement, (Shard, _StridedShard)):
-            continue
-        dim = placement.dim
-        if dim < 0:
-            dim = dim + ndim
-        if dim < 0 or dim >= ndim:
-            return None
-        curr = sym_shape[dim]
-        if isinstance(placement, _StridedShard):
-            sym_shape[dim] = _max_strided_shard_size(
-                curr, device_mesh.size(mesh_dim), placement.split_factor
-            )
-        else:
-            sym_shape[dim] = (curr + device_mesh.size(mesh_dim) - 1) // device_mesh.size(
-                mesh_dim
-            )
-    return torch.Size(sym_shape)
 
 aten = torch.ops.aten
 
@@ -423,7 +369,7 @@ class DTensor(torch.Tensor):
         Returns the base NVSHMEM allocation for the local tensor, if present.
         Falls back to the local tensor when no base is tracked.
         """
-        return getattr(self._local_tensor, "_nvshmem_base", self._local_tensor)
+        return nvshmem_base(self._local_tensor)
 
     def __tensor_flatten__(self):
         """
@@ -1032,7 +978,7 @@ def distribute_tensor(
 
     if local_tensor is None:
         raise AssertionError("distributing a tensor should not be None")
-    nvshmem_shape = _compute_nvshmem_symmetric_shape(
+    nvshmem_shape = compute_nvshmem_symmetric_shape(
         tensor.size(), device_mesh, placements
     )
     if (
@@ -1287,7 +1233,7 @@ def _dtensor_init_helper(  # type: ignore[no-untyped-def]
         size, device_mesh, placements, skip_offset=True
     )
 
-    nvshmem_shape = _compute_nvshmem_symmetric_shape(size, device_mesh, placements)
+    nvshmem_shape = compute_nvshmem_symmetric_shape(size, device_mesh, placements)
     use_nvshmem = (
         should_use_nvshmem(torch.device(device_mesh.device_type))
         and nvshmem_shape is not None
