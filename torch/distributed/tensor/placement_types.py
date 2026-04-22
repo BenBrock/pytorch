@@ -21,6 +21,10 @@ from torch.distributed.tensor._collective_utils import (
     shard_dim_alltoall,
     unpad_tensor,
 )
+from torch.distributed.tensor._nvshmem_utils import (
+    nvshmem_tensor_like,
+    should_use_nvshmem,
+)
 from torch.distributed.tensor._ops._mask_buffer import MaskBuffer
 from torch.types import IntLikeType
 
@@ -328,7 +332,10 @@ class Shard(torch._C._distributed.Shard):
         if not all(first.shape == v.shape for v in it):
             raise AssertionError
 
-        output = torch.empty_like(first)
+        use_nvshmem = should_use_nvshmem(first.device) and (
+            tensor.size(self.dim) % num_chunks == 0
+        )
+        output = nvshmem_tensor_like(first) if use_nvshmem else torch.empty_like(first)
 
         # perform scatter from the src_data_rank as data source when it is not None
         mesh_scatter(
@@ -812,7 +819,10 @@ class _StridedShard(torch._C._distributed.StridedShard):
         if not all(first.shape == v.shape for v in it):
             raise AssertionError
 
-        output = torch.empty_like(first)
+        use_nvshmem = should_use_nvshmem(first.device) and (
+            tensor.size(self.dim) % (num_chunks * self.split_factor) == 0
+        )
+        output = nvshmem_tensor_like(first) if use_nvshmem else torch.empty_like(first)
 
         # perform scatter from the src_data_rank as data source when it is not None
         mesh_scatter(
