@@ -65,7 +65,7 @@ def _compute_max_local_numel(
 
 
 def _narrow_and_view(base: torch.Tensor, shape: torch.Size) -> torch.Tensor:
-    return base.narrow(0, 0, _numel(shape)).view(shape)
+    return base.narrow(0, 0, _numel(shape)).view(shape).detach()
 
 
 def _is_eligible_device(device: torch.device) -> bool:
@@ -116,5 +116,6 @@ def copy_to_symmetric_memory(
         max_numel, dtype=local_tensor.dtype, device=local_tensor.device
     )
     out = _narrow_and_view(base, local_tensor.shape)
-    out.copy_(local_tensor)
+    with torch.no_grad():
+        out.copy_(local_tensor)
     return out

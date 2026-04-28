@@ -376,12 +376,18 @@ class DTensorSymmetricMemoryTest(DTensorTestBase):
     @with_comms
     def test_distribute_tensor_copies_to_symmetric_memory(self):
         mesh = self.build_device_mesh()
-        full_tensor = torch.arange(35, device=self.device_type).view(5, 7)
+        full_tensor = (
+            torch.arange(35, device=self.device_type, dtype=torch.float32)
+            .view(5, 7)
+            .requires_grad_()
+        )
 
         with use_symmetric_memory():
             dist_tensor = distribute_tensor(full_tensor, mesh, [Shard(1)])
 
         self._assert_is_symmetric_dtensor(dist_tensor)
+        self.assertTrue(dist_tensor._local_tensor.is_leaf)
+        self.assertTrue(dist_tensor._local_tensor.requires_grad)
         expected_chunks = list(torch.chunk(full_tensor, self.world_size, dim=1))
         torch.testing.assert_close(dist_tensor.to_local(), expected_chunks[self.rank])
         torch.testing.assert_close(dist_tensor.full_tensor(), full_tensor)
