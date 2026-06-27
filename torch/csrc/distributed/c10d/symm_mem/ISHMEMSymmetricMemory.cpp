@@ -207,7 +207,13 @@ class ISHMEMSymmetricMemory : public SymmetricMemory {
       opts.timeout = std::chrono::milliseconds(timeout_ms);
     }
     auto work = group->barrier(opts);
-    work->wait(opts.timeout);
+    // timeout_ms == 0 means "no timeout"; wait() blocks until completion.
+    // Passing the unset BarrierOptions::timeout to wait() spuriously times out.
+    if (timeout_ms > 0) {
+      work->wait(std::chrono::milliseconds(timeout_ms));
+    } else {
+      work->wait();
+    }
   }
 
   void put_signal(int /* dst_rank */, int /* channel */, size_t /* timeout_ms */)
@@ -272,7 +278,11 @@ static void initialize_ishmem_with_store(
 
   c10::DeviceGuard guard(c10::Device(c10::DeviceType::XPU, device_idx));
 
-  ishmemx_uniqueid_t unique_id;
+  // Value-initialize: ishmemx_get_uniqueid only writes the leading id string and
+  // leaves the rest of the 128-byte buffer untouched. The all_gather + memcmp
+  // below compares the whole struct, so the uninitialized tail must be zeroed or
+  // ranks spuriously disagree.
+  ishmemx_uniqueid_t unique_id{};
   int err = ishmemx_get_uniqueid(&unique_id);
   TORCH_CHECK(err == 0, "ishmemx_get_uniqueid failed with error code ", err);
   auto unique_ids =
