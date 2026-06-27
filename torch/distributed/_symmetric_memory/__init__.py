@@ -2034,7 +2034,22 @@ def is_nvshmem_available() -> bool:
     return _is_nvshmem_available()
 
 
-def set_backend(name: Literal["NVSHMEM", "CUDA", "NCCL"]) -> None:
+def is_ishmem_available() -> bool:
+    r"""
+    is_ishmem_available() -> bool
+
+    Check if Intel SHMEM is available in the current build and usable at
+    runtime.
+    """
+    try:
+        from torch._C._distributed_c10d import _is_ishmem_available
+    except ImportError:
+        return False
+
+    return _is_ishmem_available()
+
+
+def set_backend(name: Literal["NVSHMEM", "CUDA", "NCCL", "ISHMEM"]) -> None:
     r"""
     Set the backend for symmetric memory allocation. This is a global setting
     and affects all subsequent calls to
@@ -2043,7 +2058,7 @@ def set_backend(name: Literal["NVSHMEM", "CUDA", "NCCL"]) -> None:
 
     Args:
         backend (str): the backend for symmetric memory allocation. Currently,
-            only `"NVSHMEM"`, `"CUDA"`, `"NCCL"` are supported.
+            only `"NVSHMEM"`, `"CUDA"`, `"NCCL"`, `"ISHMEM"` are supported.
     """
     _SymmetricMemory.set_backend(name)
 
@@ -2232,6 +2247,8 @@ def get(
     hdl_boxed = hdl.boxed() if hasattr(hdl, "boxed") else hdl
     if backend == "NVSHMEM":
         torch.ops.symm_mem.nvshmem_get_out(dst, hdl_boxed, offset, size, peer)
+    elif backend == "ISHMEM":
+        torch.ops.symm_mem.ishmem_get_out(dst, hdl_boxed, offset, size, peer)
     elif backend == "NCCL":
         torch.ops.symm_mem.nccl_get_out(dst, hdl_boxed, offset, size, peer)
     else:

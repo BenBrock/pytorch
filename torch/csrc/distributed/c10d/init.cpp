@@ -56,6 +56,9 @@
 #ifdef USE_NVSHMEM
 #include <torch/csrc/distributed/c10d/symm_mem/nvshmem_extension.hpp>
 #endif
+#ifdef USE_ISHMEM
+#include <torch/csrc/distributed/c10d/symm_mem/ishmem_extension.hpp>
+#endif
 
 #include <torch/csrc/distributed/c10d/comm.hpp>
 #include <torch/csrc/distributed/c10d/debug.h>
@@ -1094,6 +1097,12 @@ Example:
   // Check if NVSHMEM is available on current system.
   module.def(
       "_is_nvshmem_available", ::c10d::nvshmem_extension::is_nvshmem_available);
+#endif
+
+#ifdef USE_ISHMEM
+  // Check if ISHMEM is available on current system.
+  module.def(
+      "_is_ishmem_available", ::c10d::ishmem_extension::is_ishmem_available);
 #endif
 
   py::class_<::c10d::BroadcastOptions>(module, "BroadcastOptions")

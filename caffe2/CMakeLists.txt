@@ -1215,6 +1215,38 @@ if(USE_XPU)
         FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp")
 
   endif()
+
+  if(USE_ISHMEM)
+    if(NOT DEFINED ISHMEM_HOST_LINK_TYPE)
+      set(ISHMEM_HOST_LINK_TYPE SHARED)
+    endif()
+    if(DEFINED ISHMEM_DIR)
+      get_filename_component(_ishmem_cmake_dir "${ISHMEM_DIR}" ABSOLUTE)
+      get_filename_component(_ishmem_root "${_ishmem_cmake_dir}/../../.." ABSOLUTE)
+      set(ISHMEM_ROOT "${_ishmem_root}" CACHE PATH "Intel SHMEM install root" FORCE)
+    endif()
+    find_package(ISHMEM CONFIG QUIET
+      HINTS ${ISHMEM_ROOT} $ENV{ISHMEM_HOME} $ENV{ISHMEM_ROOT}
+      PATH_SUFFIXES lib/cmake/ishmem)
+    if(ISHMEM_FOUND AND TARGET ISHMEM::HOST_SHARED)
+      message(STATUS "ISHMEM found, building with ISHMEM symmetric memory support")
+      add_library(torch_ishmem SHARED
+          "${TORCH_SRC_DIR}/csrc/distributed/c10d/symm_mem/ISHMEMSymmetricMemory.cpp"
+          "${TORCH_SRC_DIR}/csrc/distributed/c10d/symm_mem/ishmem_extension.cpp"
+      )
+      target_link_libraries(torch_ishmem PRIVATE
+          torch_cpu
+          c10_xpu
+          torch::xpurt
+          ISHMEM::HOST_SHARED)
+      target_compile_definitions(torch_ishmem PUBLIC USE_ISHMEM)
+      target_link_libraries(torch_xpu PRIVATE torch_ishmem)
+      target_compile_definitions(torch_xpu PUBLIC USE_ISHMEM)
+      install(TARGETS torch_ishmem EXPORT Caffe2Targets DESTINATION "${TORCH_INSTALL_LIB_DIR}")
+    else()
+      message(STATUS "ISHMEM not found, not building with ISHMEM symmetric memory support.")
+    endif()
+  endif()
 endif()
 
 if(NOT MSVC AND USE_XNNPACK)

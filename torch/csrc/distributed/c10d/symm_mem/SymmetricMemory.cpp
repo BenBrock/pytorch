@@ -553,6 +553,8 @@ TORCH_LIBRARY_FRAGMENT(symm_mem, m) {
   m.def(
       "nvshmem_get_out(Tensor(a!) dst, __torch__.torch.classes.c10d.SymmetricMemory hdl, int offset, int size, int peer) -> ()");
   m.def(
+      "ishmem_get_out(Tensor(a!) dst, __torch__.torch.classes.c10d.SymmetricMemory hdl, int offset, int size, int peer) -> ()");
+  m.def(
       "nvshmem_broadcast(Tensor(a!) input, int root, str group_name) -> Tensor(a!)");
   m.def("nvshmem_wait_for_signal(Tensor sigpad, int signal, int peer) -> ()");
   m.def(

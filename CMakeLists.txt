@@ -310,6 +310,8 @@ cmake_dependent_option(USE_NCCL_EP "Build NCCL EP contrib library" OFF
                        "USE_NCCL;USE_CUDA" OFF)
 cmake_dependent_option(USE_NVSHMEM "Use NVSHMEM" ON
                        "USE_DISTRIBUTED;USE_CUDA OR USE_ROCM;UNIX;NOT APPLE" OFF)
+cmake_dependent_option(USE_ISHMEM "Use Intel SHMEM" ON
+                       "USE_DISTRIBUTED;USE_XPU;UNIX;NOT APPLE" OFF)
 option(USE_NNAPI "Use NNAPI" OFF)
 option(USE_NNPACK "Use NNPACK" ON)
 cmake_dependent_option(USE_NUMA "Use NUMA. Only available on Linux." ON "LINUX"
